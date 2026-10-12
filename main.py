@@ -9,7 +9,7 @@ from google.genai import types as genai_types
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = "AQ.Ab8RN6LgP1CXO1d_QLcbXQbAUkNOchegbXrz8iT357tgAeGpjw"
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if not TELEGRAM_BOT_TOKEN:
