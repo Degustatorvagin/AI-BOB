@@ -6,17 +6,16 @@ import aiohttp
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 load_dotenv()
 
-# --- НАСТРОЙКИ ---
+# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # Например: "@my_channel" или "-1001234567890"
 
-# Какую модель использовать:
-# "gemini-3.8-flash" — быстрая, идеальна для текстов и войсов
-# "gemini-3.1-pro-preview" — максимальный интеллект и глубокая проработка
 MODEL_NAME = "gemini-3.8-flash"
 
 if not TELEGRAM_BOT_TOKEN:
@@ -30,7 +29,6 @@ BASE_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилище контекста диалогов (до 10 последних реплик на чат)
 user_histories = {}
 
 SYSTEM_INSTRUCTION = """Ты, Алёха, редактор моего телеграм-канала. Канал про ИИ для маркетинга и развития.
@@ -41,13 +39,19 @@ SYSTEM_INSTRUCTION = """Ты, Алёха, редактор моего телег
 Если пользователь только поздоровался или сбросил контекст — ответь коротко в своем стиле: скажи, чтобы накидывал сырую мысль текстом или войсом."""
 
 def is_authorized(user_id: int) -> bool:
-    """Проверка доступа, если указан ADMIN_ID"""
     if ADMIN_ID and str(user_id) != str(ADMIN_ID).strip():
         return False
     return True
 
+def get_publish_keyboard():
+    """Создает кнопку публикации под постом"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Опубликовать в канал", callback_data="publish_post")]
+        ]
+    )
+
 async def query_gemini(chat_id: int, user_parts: list) -> str:
-    """Отправляет запрос в Gemini с автоповтором при ошибке 503"""
     if chat_id not in user_histories:
         user_histories[chat_id] = []
 
@@ -56,7 +60,6 @@ async def query_gemini(chat_id: int, user_parts: list) -> str:
         "parts": user_parts
     })
 
-    # Ограничиваем историю, чтобы не перегружать контекст
     if len(user_histories[chat_id]) > 10:
         user_histories[chat_id] = user_histories[chat_id][-10:]
 
@@ -87,16 +90,15 @@ async def query_gemini(chat_id: int, user_parts: list) -> str:
                     })
                     return reply_text
 
-                # Обработка ошибки 503 (временный пик нагрузки у Google)
                 if resp.status == 503:
                     if attempt < max_retries:
                         await asyncio.sleep(2 * attempt)
                         continue
                     else:
-                        raise Exception("Серверы Google перегружены. Попробуй отправить еще раз через 10 секунд.")
+                        raise Exception("Серверы перегружены, попробуй через 10 секунд.")
 
                 err_msg = data.get("error", {}).get("message", f"HTTP {resp.status}")
-                raise Exception(f"Ошибка Google API ({resp.status}): {err_msg}")
+                raise Exception(f"Ошибка Google API: {err_msg}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -104,10 +106,9 @@ async def cmd_start(message: types.Message):
         return
     user_histories.pop(message.chat.id, None)
     await message.answer(
-        "Салют! Я Алёха — твой редактор по ИИ и маркетингу.\n\n"
-        "Накидывай сырую мысль текстом или прямо войсом — соберу пост на 600–900 знаков. "
-        "Если идея слабая — скажу прямо и предложу нормальный угол.\n\n"
-        "Команда /new — сбросить контекст для нового поста."
+        "Салют! Я Алёха — твой редактор.\n\n"
+        "Накидывай сырую мысль войсом или текстом. Я соберу пост, а под ним будет кнопка для мгновенной отправки в твой канал!\n\n"
+        "Команда /new — начать новый пост с чистого листа."
     )
 
 @dp.message(Command("new", "reset"))
@@ -127,7 +128,8 @@ async def handle_text(message: types.Message):
 
     try:
         reply = await query_gemini(chat_id, [{"text": message.text}])
-        await message.answer(reply)
+        # Отправляем ответ с кнопкой публикации
+        await message.answer(reply, reply_markup=get_publish_keyboard())
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
@@ -140,13 +142,10 @@ async def handle_voice(message: types.Message):
     await bot.send_chat_action(chat_id, "typing")
 
     try:
-        # Скачиваем голосовое сообщение в буфер оперативной памяти
         file_io = io.BytesIO()
         file = await bot.get_file(message.voice.file_id)
         await bot.download_file(file.file_path, file_io)
         voice_bytes = file_io.getvalue()
-
-        # Кодируем аудио в base64
         voice_b64 = base64.b64encode(voice_bytes).decode("utf-8")
 
         parts = [
@@ -162,12 +161,43 @@ async def handle_voice(message: types.Message):
         ]
 
         reply = await query_gemini(chat_id, parts)
-        await message.answer(reply)
+        # Отправляем ответ с кнопкой публикации
+        await message.answer(reply, reply_markup=get_publish_keyboard())
     except Exception as e:
-        await message.answer(f"Ошибка при обработке войса: {e}")
+        await message.answer(f"Ошибка обработки войса: {e}")
+
+# --- ОБРАБОТКА НАЖАТИЯ НА КНОПКУ ПУБЛИКАЦИИ ---
+@dp.callback_query(F.data == "publish_post")
+async def publish_to_channel(callback: CallbackQuery):
+    if not CHANNEL_ID:
+        await callback.answer("Ошибка: переменная CHANNEL_ID не настроена!", show_alert=True)
+        return
+
+    try:
+        # Берем текст того сообщения, под которым была нажата кнопка
+        post_text = callback.message.text
+
+        # Публикуем в канал
+        await bot.send_message(chat_id=CHANNEL_ID, text=post_text)
+
+        # Меняем кнопку на подтверждение, чтобы не отправить дважды
+        await callback.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Опубликовано в канал!", callback_data="done")]
+                ]
+            )
+        )
+        await callback.answer("Пост успешно улетел в канал!")
+    except Exception as e:
+        await callback.answer(f"Не удалось отправить в канал: {e}", show_alert=True)
+
+@dp.callback_query(F.data == "done")
+async def already_done(callback: CallbackQuery):
+    await callback.answer("Этот пост уже опубликован.")
 
 async def main():
-    print(f">>> Бот-редактор Алёха запущен на модели {MODEL_NAME}! <<<")
+    print(f">>> Бот-редактор запущен! Готов к публикации в {CHANNEL_ID} <<<")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
