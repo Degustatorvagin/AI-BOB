@@ -12,17 +12,18 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
-# Быстрая проверка наличия ключа при старте
 if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не задан! Проверь переменные окружения.")
+    raise ValueError("TELEGRAM_BOT_TOKEN не найден в .env или переменных окружения!")
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY не задан! Проверь переменные окружения на BotHost.")
+    raise ValueError("GEMINI_API_KEY не найден в .env или переменных окружения!")
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+
+# Инициализируем клиент с обычным API-ключом
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Хранилище сессий чата для каждого пользователя
+# Хранилище сессий чата
 user_chats = {}
 
 SYSTEM_INSTRUCTION = """Ты, Алёха, редактор моего телеграм-канала. Канал про ИИ для маркетинга и развития.
@@ -30,10 +31,9 @@ SYSTEM_INSTRUCTION = """Ты, Алёха, редактор моего телег
 Первая строка: крючок без воды. Дальше одна мысль и живой пример. В конце вопрос читателю.
 Пиши моими словами. Слабая мысль? Скажи честно и предложи другой угол.
 
-Если пользователь только поздоровался или сбросил диалог — ответь коротко в своем деловом и живом стиле редактора Алёхи: скажи, чтобы накидывал мысль текстом или войсом."""
+Если пользователь только поздоровался или сбросил диалог — ответь коротко в своем деловом стиле: скажи, чтобы накидывал сырую мысль текстом или войсом."""
 
 def get_or_create_chat(chat_id: int):
-    """Создает или возвращает существующую чат-сессию с памятью контекста"""
     if chat_id not in user_chats:
         user_chats[chat_id] = ai_client.chats.create(
             model="gemini-3.8-flash",
@@ -55,8 +55,8 @@ async def cmd_start(message: types.Message):
     user_chats.pop(message.chat.id, None)
     await message.answer(
         "Салют! Я Алёха — твой редактор по ИИ и маркетингу.\n\n"
-        "Накидывай сырую мысль текстом или прямо войсом — сделаю плотный пост на 600–900 знаков. "
-        "Если мысль вода — скажу прямо и предложу нормальный заход.\n\n"
+        "Накидывай сырую мысль текстом или прямо войсом — соберу пост на 600–900 знаков. "
+        "Если идея слабая — скажу прямо и предложу нормальный угол.\n\n"
         "Команда /new — сбросить контекст для нового поста."
     )
 
@@ -65,7 +65,7 @@ async def cmd_reset(message: types.Message):
     if not is_authorized(message.from_user.id):
         return
     user_chats.pop(message.chat.id, None)
-    await message.answer("Контекст сброшен. Закидывай следующую мысль!")
+    await message.answer("Контекст очищен. Закидывай следующую тему!")
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
@@ -77,8 +77,9 @@ async def handle_text(message: types.Message):
 
     try:
         chat_session = get_or_create_chat(chat_id)
+        # Отправляем сообщение через стандартный генеративный чат
         response = await asyncio.to_thread(chat_session.send_message, message.text)
-        await message.answer(response.text or "Пустой ответ от модели.")
+        await message.answer(response.text or "Пустой ответ.")
     except Exception as e:
         await message.answer(f"Ошибка при генерации: {e}")
 
@@ -92,12 +93,10 @@ async def handle_voice(message: types.Message):
     file_name = f"voice_{chat_id}_{message.message_id}.ogg"
 
     try:
-        # Скачиваем голосовое сообщение из Telegram
         voice_file = await bot.get_file(message.voice.file_id)
         await bot.download_file(voice_file.file_path, file_name)
 
         def process_voice():
-            # Загружаем аудиофайл с явным указанием MIME-типа
             uploaded_audio = ai_client.files.upload(
                 file=file_name,
                 config=genai_types.UploadFileConfig(mime_type="audio/ogg")
@@ -109,7 +108,7 @@ async def handle_voice(message: types.Message):
             ])
 
         response = await asyncio.to_thread(process_voice)
-        await message.answer(response.text or "Не удалось распознать войс.")
+        await message.answer(response.text or "Не удалось разобрать войс.")
 
     except Exception as e:
         await message.answer(f"Ошибка при обработке войса: {e}")
@@ -118,7 +117,7 @@ async def handle_voice(message: types.Message):
             os.remove(file_name)
 
 async def main():
-    print("Редактор Алёха успешно запущен!")
+    print(">>> ВЕРСИЯ 2.0 БЕЗ INTERACTIONS ЗАПУЩЕНА! <<<")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
