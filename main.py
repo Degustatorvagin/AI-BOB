@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
 from google import genai
+from google.genai import types as genai_types
 
 load_dotenv()
 
@@ -11,31 +12,36 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
+# Быстрая проверка наличия ключа при старте
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не задан! Проверь переменные окружения.")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY не задан! Проверь переменные окружения на BotHost.")
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Сессии пользователей для сохранения контекста доработок
-user_sessions = {}
+# Хранилище сессий чата для каждого пользователя
+user_chats = {}
 
-SYSTEM_INSTRUCTION = """Ты, Боб, редактор моего телеграм-канала. Канал про ИИ для маркетинга и развития.
+SYSTEM_INSTRUCTION = """Ты, Алёха, редактор моего телеграм-канала. Канал про ИИ для маркетинга и развития.
 Требуй с меня одну сырую мысль, текстом или голосовым. Делай из неё пост на 600-900 знаков.
 Первая строка: крючок без воды. Дальше одна мысль и живой пример. В конце вопрос читателю.
 Пиши моими словами. Слабая мысль? Скажи честно и предложи другой угол.
 
 Если пользователь только поздоровался или сбросил диалог — ответь коротко в своем деловом и живом стиле редактора Алёхи: скажи, чтобы накидывал мысль текстом или войсом."""
 
-def run_gemini(user_input, prev_interaction_id=None):
-    """Синхронный вызов Gemini в отдельном потоке"""
-    params = {
-        "model": "gemini-3.8-flash",
-        "input": user_input,
-        "system_instruction": SYSTEM_INSTRUCTION,
-    }
-    if prev_interaction_id:
-        params["previous_interaction_id"] = prev_interaction_id
-    
-    return ai_client.interactions.create(**params)
+def get_or_create_chat(chat_id: int):
+    """Создает или возвращает существующую чат-сессию с памятью контекста"""
+    if chat_id not in user_chats:
+        user_chats[chat_id] = ai_client.chats.create(
+            model="gemini-3.8-flash",
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION
+            )
+        )
+    return user_chats[chat_id]
 
 def is_authorized(user_id: int) -> bool:
     if ADMIN_ID and str(user_id) != str(ADMIN_ID):
@@ -46,7 +52,7 @@ def is_authorized(user_id: int) -> bool:
 async def cmd_start(message: types.Message):
     if not is_authorized(message.from_user.id):
         return
-    user_sessions.pop(message.chat.id, None)
+    user_chats.pop(message.chat.id, None)
     await message.answer(
         "Салют! Я Алёха — твой редактор по ИИ и маркетингу.\n\n"
         "Накидывай сырую мысль текстом или прямо войсом — сделаю плотный пост на 600–900 знаков. "
@@ -58,8 +64,8 @@ async def cmd_start(message: types.Message):
 async def cmd_reset(message: types.Message):
     if not is_authorized(message.from_user.id):
         return
-    user_sessions.pop(message.chat.id, None)
-    await message.answer("Контекст сброшен. Закидывай следующую сырую мысль!")
+    user_chats.pop(message.chat.id, None)
+    await message.answer("Контекст сброшен. Закидывай следующую мысль!")
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
@@ -67,13 +73,12 @@ async def handle_text(message: types.Message):
         return
 
     chat_id = message.chat.id
-    prev_id = user_sessions.get(chat_id)
     await bot.send_chat_action(chat_id, "typing")
 
     try:
-        interaction = await asyncio.to_thread(run_gemini, message.text, prev_id)
-        user_sessions[chat_id] = interaction.id
-        await message.answer(interaction.output_text or "Пустой ответ от модели.")
+        chat_session = get_or_create_chat(chat_id)
+        response = await asyncio.to_thread(chat_session.send_message, message.text)
+        await message.answer(response.text or "Пустой ответ от модели.")
     except Exception as e:
         await message.answer(f"Ошибка при генерации: {e}")
 
@@ -83,28 +88,28 @@ async def handle_voice(message: types.Message):
         return
 
     chat_id = message.chat.id
-    prev_id = user_sessions.get(chat_id)
     await bot.send_chat_action(chat_id, "typing")
-
     file_name = f"voice_{chat_id}_{message.message_id}.ogg"
 
     try:
-        # Скачиваем голосовое сообщение
+        # Скачиваем голосовое сообщение из Telegram
         voice_file = await bot.get_file(message.voice.file_id)
         await bot.download_file(voice_file.file_path, file_name)
 
-        # Отправляем аудио в Gemini
         def process_voice():
-            uploaded_audio = ai_client.files.upload(file=file_name)
-            inputs = [
+            # Загружаем аудиофайл с явным указанием MIME-типа
+            uploaded_audio = ai_client.files.upload(
+                file=file_name,
+                config=genai_types.UploadFileConfig(mime_type="audio/ogg")
+            )
+            chat_session = get_or_create_chat(chat_id)
+            return chat_session.send_message([
                 uploaded_audio,
                 "Вот моя сырая мысль из голосового. Сделай из неё пост по правилам редактора."
-            ]
-            return run_gemini(inputs, prev_id)
+            ])
 
-        interaction = await asyncio.to_thread(process_voice)
-        user_sessions[chat_id] = interaction.id
-        await message.answer(interaction.output_text or "Не удалось разобрать голосовое.")
+        response = await asyncio.to_thread(process_voice)
+        await message.answer(response.text or "Не удалось распознать войс.")
 
     except Exception as e:
         await message.answer(f"Ошибка при обработке войса: {e}")
